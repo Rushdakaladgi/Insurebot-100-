@@ -13,10 +13,10 @@ from app.api import auth, claims, policies, chatbot, admin
 
 app = FastAPI(title="Insurance Platform API")
 
-# CORS — allow all origins for local dev and Render
+# CORS — allow main Netlify domain + all Netlify deploy previews
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://insurebot.netlify.app"],
+    allow_origin_regex=r"https://(.*--)?insurebot\.netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
