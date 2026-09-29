@@ -4,40 +4,70 @@ Insurance chatbot using Groq API (openai/gpt-oss-20b)
 """
 
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
+MODEL = "openai/gpt-oss-20b"
+MAX_HISTORY = 8            # only last N messages sent -> saves input tokens
+SHORT_TOKENS = 500         # normal answers (includes reasoning tokens)
+DETAILED_TOKENS = 1500     # when user asks for detail / steps / lists
+
+DETAIL_KEYWORDS = [
+    "detail", "explain", "step by step", "steps", "in depth", "elaborate",
+    "full process", "complete guide", "list all", "everything about", "how to file",
+]
+
 SYSTEM_PROMPT = """You are InsureBot, an AI assistant for an Indian insurance claims platform.
 
-You help users with:
-- Understanding their insurance policies (health, car, house, business)
-- Guidance on filing claims in India
-- IRDAI (Insurance Regulatory and Development Authority of India) regulations
-- Documents required for different claim types
-- Understanding policy terms and exclusions
-- Settlement processes and timelines
-- Tips to avoid claim rejection
+You help with: health/car/house/business policies, filing claims in India, IRDAI rules,
+required documents, policy terms and exclusions, settlement timelines, avoiding claim rejection.
 
-Always:
-- Use Indian context (₹ for currency, Indian regulations, IRDAI rules)
-- Be concise and helpful
-- If asked about specific policy details you don't have, ask the user to upload their policy document
-- Never give legal or financial advice — recommend consulting a professional for complex cases
-- Be empathetic when users are dealing with damage or loss
+Rules:
+- Use Indian context (₹, IRDAI, Indian practices).
+- Be empathetic when users are dealing with damage or loss.
+- If you lack policy specifics, ask the user to upload their policy document.
+- Never give legal or financial advice; suggest a professional for complex cases.
 
-Keep responses under 300 words unless the user asks for detailed explanation."""
+Length rules (important):
+- Default: answer in 2-5 short sentences or up to 5 tight bullets (about 60-120 words).
+- Give the direct answer first, no long intros, no repeating the question.
+- Only go longer (up to ~350 words) if the user asks for detail, steps, or a full explanation.
+- Always finish your last sentence; if there is more to say, end with a one-line offer to continue.
+
+Formatting rules (important):
+- Do NOT use tables. Do NOT use HTML tags such as <br>.
+- Use short bullets starting with "- " and **bold** for key terms.
+- Put each point on its own line. Keep bullets to one sentence each."""
+
+
+def _wants_detail(text: str) -> bool:
+    text = text.lower()
+    return any(k in text for k in DETAIL_KEYWORDS)
+
+
+def _clean(text: str) -> str:
+    """Remove HTML line breaks and odd characters the frontend can't render."""
+    lines = []
+    for line in text.split("\n"):
+        if line.strip().startswith("|"):
+            line = re.sub(r"<br\s*/?>", "; ", line, flags=re.I)   # keep table row intact
+        else:
+            line = re.sub(r"<br\s*/?>", "\n", line, flags=re.I)
+        lines.append(line)
+    text = "\n".join(lines)
+    text = text.replace("\u2011", "-")   # non-breaking hyphen
+    return text.strip()
 
 
 def chat(messages: list) -> str:
     """
-    Send messages to Groq and get chatbot response.
     messages: list of {role: user/assistant, content: str}
     Returns: response string
     """
-
     if not GROQ_API_KEY:
         return _fallback_response(messages)
 
@@ -46,17 +76,30 @@ def chat(messages: list) -> str:
 
         client = Groq(api_key=GROQ_API_KEY)
 
-        # Build full message list with system prompt
-        full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+        recent = [m for m in messages if m["role"] in ("user", "assistant")][-MAX_HISTORY:]
+        full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + recent
+
+        last_user = recent[-1]["content"] if recent else ""
+        budget = DETAILED_TOKENS if _wants_detail(last_user) else SHORT_TOKENS
 
         response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model=MODEL,
             messages=full_messages,
-            max_tokens=600,
-            temperature=0.7
+            max_completion_tokens=budget,
+            reasoning_effort="low",
+            temperature=0.5,
         )
 
-        return response.choices[0].message.content
+        choice = response.choices[0]
+        text = _clean(choice.message.content or "")
+
+        if not text:  # reasoning ate the whole budget
+            return "Sorry, I couldn't finish that answer. Could you rephrase or ask a more specific question?"
+
+        if choice.finish_reason == "length":
+            text += "\n\n*(Reply was cut short. Type **continue** for the rest.)*"
+
+        return text
 
     except Exception as e:
         print(f"[Chatbot Error] {e}")
