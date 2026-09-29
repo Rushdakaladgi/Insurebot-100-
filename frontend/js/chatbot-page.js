@@ -35,60 +35,74 @@
   // ─────────────────────────────────────────
   // Markdown / sanitize (same as widget)
   // ─────────────────────────────────────────
-  function sanitize(text) {
+    function sanitize(text) {
     if (!text) return "";
-    var lines = text.split(/\r?\n/);
-    var html  = "";
-    var i     = 0;
+
+    // <br> outside tables -> real newline (inside tables it's handled in inline())
+    text = text
+      .split(/\r?\n/)
+      .map((l) => (l.trim().startsWith("|") ? l : l.replace(/<br\s*\/?>/gi, "\n")))
+      .join("\n");
+
+    const lines = text.split("\n");
+    let html = "";
+    let i = 0;
+
+    const splitRow = (row) =>
+      row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
 
     while (i < lines.length) {
-      var line = lines[i];
+      const line = lines[i];
 
-      // Table row detection
-      if (/^\|/.test(line) && i + 1 < lines.length && /^\|[-| ]+\|/.test(lines[i + 1])) {
-        var headers = line.split("|").filter((c) => c.trim() !== "").map((c) => `<th>${esc(c.trim())}</th>`).join("");
-        html += `<table class="chat-table"><thead><tr>${headers}</tr></thead><tbody>`;
+      // Table (header row + separator row like |---|:---:|)
+      if (
+        line.trim().startsWith("|") &&
+        i + 1 < lines.length &&
+        /^\s*\|[\s:\-|]+\|?\s*$/.test(lines[i + 1])
+      ) {
+        const head = splitRow(line).map((c) => `<th>${inline(c)}</th>`).join("");
+        html += `<div style="overflow-x:auto"><table class="chat-table"><thead><tr>${head}</tr></thead><tbody>`;
         i += 2;
-        while (i < lines.length && /^\|/.test(lines[i])) {
-          var cells = lines[i].split("|").filter((c) => c.trim() !== "").map((c) => `<td>${inline(c.trim())}</td>`).join("");
+        while (i < lines.length && lines[i].trim().startsWith("|")) {
+          const cells = splitRow(lines[i]).map((c) => `<td>${inline(c)}</td>`).join("");
           html += `<tr>${cells}</tr>`;
           i++;
         }
-        html += `</tbody></table>`;
+        html += `</tbody></table></div>`;
         continue;
       }
 
-      // Headings
-      var hm = line.match(/^(#{1,3})\s+(.*)/);
-      if (hm) { html += `<h${hm[1].length} class="chat-h">${inline(hm[2])}</h${hm[1].length}>`; i++; continue; }
-
-      // HR
+      // Horizontal rule
       if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) { html += "<hr>"; i++; continue; }
 
-      // Bullet list
-      if (/^[-*]\s/.test(line)) {
+      // Headings
+      const hm = line.match(/^(#{1,3})\s+(.*)/);
+      if (hm) { html += `<h${hm[1].length} class="chat-h">${inline(hm[2])}</h${hm[1].length}>`; i++; continue; }
+
+      // Bullet list (-, *, •, allows indentation)
+      if (/^\s*[-*\u2022]\s+/.test(line)) {
         html += "<ul>";
-        while (i < lines.length && /^[-*]\s/.test(lines[i])) {
-          html += `<li>${inline(lines[i].replace(/^[-*]\s/, ""))}</li>`;
+        while (i < lines.length && /^\s*[-*\u2022]\s+/.test(lines[i])) {
+          html += `<li>${inline(lines[i].replace(/^\s*[-*\u2022]\s+/, ""))}</li>`;
           i++;
         }
         html += "</ul>";
         continue;
       }
 
-      // Numbered list
-      if (/^\d+\.\s/.test(line)) {
+      // Numbered list (1. or 1))
+      if (/^\s*\d+[.)]\s+/.test(line)) {
         html += "<ol>";
-        while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
-          html += `<li>${inline(lines[i].replace(/^\d+\.\s/, ""))}</li>`;
+        while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+          html += `<li>${inline(lines[i].replace(/^\s*\d+[.)]\s+/, ""))}</li>`;
           i++;
         }
         html += "</ol>";
         continue;
       }
 
-      // Blank line
-      if (line.trim() === "") { html += "<br>"; i++; continue; }
+      // Blank line: paragraph margins already add spacing
+      if (line.trim() === "") { i++; continue; }
 
       // Paragraph
       html += `<p>${inline(line)}</p>`;
@@ -98,11 +112,14 @@
   }
 
   function inline(text) {
-    return esc(text)
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g,     "<em>$1</em>")
-      .replace(/`(.+?)`/g,       "<code>$1</code>")
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return esc((text || "").replace(/<br\s*\/?>/gi, "; "))
+      .replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>")
+      .replace(/\*\*(.+?)\*\*/g,     "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/\b_([^_\n]+?)_\b/g,  "<em>$1</em>")
+      .replace(/`([^`]+?)`/g,        "<code>$1</code>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+               '<a href="$2" target="_blank" rel="noopener">$1</a>');
   }
 
   function esc(s) {
@@ -112,7 +129,6 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
-
   // ─────────────────────────────────────────
   // Message rendering
   // ─────────────────────────────────────────
