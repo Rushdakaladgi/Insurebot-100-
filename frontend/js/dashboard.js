@@ -49,8 +49,8 @@
     const hour = new Date().getHours();
     if (hour >= 5  && hour < 12) return "Good morning";
     if (hour >= 12 && hour < 17) return "Good afternoon";
-    if (hour >= 17 && hour < 21) return "Good evening";
-    return "Good night"; // 9 PM – 4:59 AM (swap for "Hello" if you prefer)
+    if (hour >= 17 && hour < 23) return "Good evening";
+    return "Up Late"; // 11 PM – 4:59 AM (swap for "Hello" if you prefer)
   }
 
   function fmtDate(iso) {
