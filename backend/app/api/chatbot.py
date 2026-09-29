@@ -1,118 +1,102 @@
 """
-backend/app/api/chatbot.py
-Chatbot API routes
+backend/app/ai/chatbot.py
+Insurance chatbot using Groq API (openai/gpt-oss-20b)
 """
 
-import uuid
-from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
+import os
+from dotenv import load_dotenv
 
-from app.auth import get_current_user
-from app.db.database import get_db
-from app.ai.chatbot import chat
+load_dotenv()
 
-router = APIRouter()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+MODEL = "openai/gpt-oss-20b"
+MAX_HISTORY = 8            # only last N messages sent -> saves input tokens
+SHORT_TOKENS = 500         # normal answers (includes reasoning tokens)
+DETAILED_TOKENS = 1500     # when user asks for detail / steps / lists
+
+DETAIL_KEYWORDS = [
+    "detail", "explain", "step by step", "steps", "in depth", "elaborate",
+    "full process", "complete guide", "list all", "everything about", "how to file",
+]
+
+SYSTEM_PROMPT = """You are InsureBot, an AI assistant for an Indian insurance claims platform.
+
+You help with: health/car/house/business policies, filing claims in India, IRDAI rules,
+required documents, policy terms and exclusions, settlement timelines, avoiding claim rejection.
+
+Rules:
+- Use Indian context (₹, IRDAI, Indian practices).
+- Be empathetic when users are dealing with damage or loss.
+- If you lack policy specifics, ask the user to upload their policy document.
+- Never give legal or financial advice; suggest a professional for complex cases.
+
+Length rules (important):
+- Default: answer in 2-5 short sentences or up to 5 tight bullets (about 60-120 words).
+- Give the direct answer first, no long intros, no repeating the question.
+- Only go longer (up to ~350 words) if the user asks for detail, steps, or a full explanation.
+- Always finish your last sentence; if there is more to say, end with a one-line offer to continue."""
 
 
-class Message(BaseModel):
-    role: str
-    content: str
+def _wants_detail(text: str) -> bool:
+    text = text.lower()
+    return any(k in text for k in DETAIL_KEYWORDS)
 
 
-class ChatRequest(BaseModel):
-    messages: List[Message]
-    session_id: Optional[str] = None
-
-
-@router.post("/message")
-async def send_message(
-    request: ChatRequest,
-    current_user: dict = Depends(get_current_user)
-):
+def chat(messages: list) -> str:
     """
-    Send a chat message and get bot response — auth required.
-    Saves both user message and bot response to chat_history.
+    messages: list of {role: user/assistant, content: str}
+    Returns: response string
     """
+    if not GROQ_API_KEY:
+        return _fallback_response(messages)
+
     try:
-        session_id = request.session_id or str(uuid.uuid4())
+        from groq import Groq
 
-        # Convert messages to plain dicts for chatbot
-        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        client = Groq(api_key=GROQ_API_KEY)
 
-        # Get bot response
-        bot_response = chat(messages)
+        # Keep only recent, valid messages
+        recent = [m for m in messages if m["role"] in ("user", "assistant")][-MAX_HISTORY:]
+        full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + recent
 
-        # Save to database
-        db = get_db()
+        last_user = recent[-1]["content"] if recent else ""
+        budget = DETAILED_TOKENS if _wants_detail(last_user) else SHORT_TOKENS
 
-        # Save last user message
-        if messages:
-            last_user_msg = messages[-1]
-            db.execute("""
-                INSERT INTO chat_history (user_id, session_id, role, content)
-                VALUES (%s, %s, %s, %s)
-            """, (
-                current_user["id"],
-                session_id,
-                last_user_msg["role"],
-                last_user_msg["content"]
-            ))
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=full_messages,
+            max_completion_tokens=budget,
+            reasoning_effort="low",   # fewer hidden thinking tokens
+            temperature=0.5,
+        )
 
-        # Save bot response
-        db.execute("""
-            INSERT INTO chat_history (user_id, session_id, role, content)
-            VALUES (%s, %s, %s, %s)
-        """, (
-            current_user["id"],
-            session_id,
-            "assistant",
-            bot_response
-        ))
+        choice = response.choices[0]
+        text = (choice.message.content or "").strip()
 
-        db.commit()
-        db.close()
+        if not text:  # reasoning ate the whole budget
+            return "Sorry, I couldn't finish that answer. Could you rephrase or ask a more specific question?"
 
-        return {
-            "success": True,
-            "response": bot_response,
-            "session_id": session_id
-        }
+        if choice.finish_reason == "length":
+            text += "\n\n_(Reply was cut short — type **continue** for the rest.)_"
+
+        return text
 
     except Exception as e:
-        print(f"[Chatbot Route Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[Chatbot Error] {e}")
+        return _fallback_response(messages)
 
 
-@router.get("/history")
-async def get_chat_history(
-    session_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
-):
-    """Get chat history for the current user — auth required."""
-    try:
-        db = get_db()
+def _fallback_response(messages: list) -> str:
+    last = messages[-1]["content"].lower() if messages else ""
 
-        if session_id:
-            history = db.execute("""
-                SELECT * FROM chat_history
-                WHERE user_id = %s AND session_id = %s
-                ORDER BY created_at ASC
-                LIMIT 50
-            """, (current_user["id"], session_id)).fetchall()
-        else:
-            history = db.execute("""
-                SELECT * FROM chat_history
-                WHERE user_id = %s
-                ORDER BY created_at DESC
-                LIMIT 50
-            """, (current_user["id"],)).fetchall()
+    if any(word in last for word in ["hello", "hi", "hey"]):
+        return "Hello! I'm InsureBot, your insurance assistant. How can I help you today?"
+    if "claim" in last:
+        return "To file a claim, you'll need your policy number, incident details, photos of damage, and relevant documents like FIR copy or medical bills. Would you like guidance for a specific claim type?"
+    if "document" in last:
+        return "Common documents required: Policy document, Photo ID, Incident report/FIR, Photos of damage, Repair estimates. The exact list depends on your claim type."
+    if "reject" in last:
+        return "Claims are commonly rejected due to: policy lapse, delayed reporting, incomplete documents, pre-existing conditions (health), or driving violations (car). Would you like tips to avoid rejection?"
 
-        db.close()
-
-        return {"success": True, "history": [dict(h) for h in history]}
-
-    except Exception as e:
-        print(f"[Chat History Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return "I'm here to help with your insurance questions. You can ask me about filing claims, required documents, policy coverage, or IRDAI regulations."
