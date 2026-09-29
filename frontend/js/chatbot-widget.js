@@ -9,8 +9,8 @@
    the widget shows a login prompt instead of the input.
 
    Markup injected automatically — no HTML needed in pages.
-   Just include this script and optionally style overrides via
-   .chat-widget* CSS classes.
+   Any hand-written widget markup (.chat-widget-wrap) already in the
+   page is removed first, so IDs never get duplicated.
 
    Optional page-level hook:
      <div id="chat-launcher-anchor"></div>
@@ -25,9 +25,9 @@
   // Constants
   // ─────────────────────────────────────────
 
-  const SESSION_KEY    = "insurebot_chat_session";
+  const SESSION_KEY     = "insurebot_chat_session";
   const WIDGET_OPEN_KEY = "insurebot_chat_open";
-  const MAX_MESSAGES   = 200; // local display cap
+  const MAX_MESSAGES    = 200; // local display cap
   const TYPING_DELAY_MS = 600; // how long to show "…" before bot response
 
   // ─────────────────────────────────────────
@@ -38,12 +38,16 @@
   let messages    = []; // [{role, content}] — full conversation for API
   let isOpen      = sessionStorage.getItem(WIDGET_OPEN_KEY) === "true";
   let isSending   = false;
+  let isExpanded  = false;
 
   // ─────────────────────────────────────────
   // Build DOM
   // ─────────────────────────────────────────
 
   function buildWidget() {
+    // Remove any hand-written widget already in the page (avoids duplicate IDs)
+    document.querySelectorAll(".chat-widget-wrap").forEach((el) => el.remove());
+
     // ── Launcher button ──
     const launcher = document.createElement("button");
     launcher.id        = "chat-launcher";
@@ -169,7 +173,6 @@
   /**
    * Appends a message bubble to #chat-messages.
    * role: "user" | "assistant" | "system"
-   * Returns the created element.
    */
   function appendMessage(role, content, id) {
     const container = document.getElementById("chat-messages");
@@ -214,13 +217,10 @@
   }
 
   /**
-   * Minimal HTML sanitiser — escapes the content so injected user text
-   * can't run arbitrary scripts, but allows line breaks.
-   */
-  /**
    * Lightweight markdown renderer for chat bubbles.
    * Handles: bold, italic, inline code, tables, bullet/numbered lists,
    * headings, horizontal rules, and literal <br> cleanup.
+   * All text is HTML-escaped first, so it can't inject scripts.
    */
   function sanitize(text) {
     if (!text) return "";
@@ -285,7 +285,7 @@
     for (var r = 0; r < tableLines.length; r++) {
       var row = tableLines[r];
       if (/^\|[\s\-:|]+\|$/.test(row.trim())) continue;
-      var cells = row.split("|").filter(function(_, idx, arr) { return idx > 0 && idx < arr.length; });
+      var cells = row.split("|").filter(function(_, idx, arr) { return idx > 0 && idx < arr.length - 1; });
       if (!headerDone) {
         out += "<thead><tr>" + cells.map(function(c) { return "<th>" + renderInline(c.trim()) + "</th>"; }).join("") + "</tr></thead><tbody>";
         headerDone = true;
@@ -354,7 +354,7 @@
     isSending = true;
     textarea.value = "";
     textarea.style.height = "auto";
-    if (sendBtn) sendBtn.disabled = true;
+    sendBtn.disabled = true;
 
     // Show user bubble immediately
     appendMessage("user", content);
@@ -362,7 +362,7 @@
 
     // Typing indicator
     await delay(TYPING_DELAY_MS);
-    const typingEl = showTyping();
+    showTyping();
 
     try {
       const res = await API.chat.send(messages, sessionId);
@@ -385,7 +385,7 @@
       appendMessage("assistant", errMsg);
     } finally {
       isSending = false;
-      if (sendBtn) sendBtn.disabled = false;
+      sendBtn.disabled = false;
       textarea.focus();
     }
   }
@@ -398,10 +398,6 @@
   // Load history (optional, on widget open)
   // ─────────────────────────────────────────
 
-  /**
-   * If there's an existing session, tries to restore the last N turns
-   * from the API so the conversation isn't lost on page reload.
-   */
   async function tryRestoreHistory() {
     if (!sessionId || !API.isLoggedIn()) return;
 
@@ -466,24 +462,16 @@
   }
 
   // ─────────────────────────────────────────
-  // Wire events
-  // ─────────────────────────────────────────
-
-
-  // ─────────────────────────────────────────
   // Expand / collapse
   // ─────────────────────────────────────────
 
-  let isExpanded = false;
-
-  // SVG paths for expand vs collapse icons
   const ICON_EXPAND   = '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>';
   const ICON_COLLAPSE = '<polyline points="4 14 4 20 10 20"/><polyline points="20 10 20 4 14 4"/><line x1="4" y1="20" x2="11" y2="13"/><line x1="20" y1="4" x2="13" y2="11"/>';
 
   function toggleExpand() {
-    const panel  = document.getElementById("chat-panel");
-    const btn    = document.getElementById("chat-expand-btn");
-    const icon   = document.getElementById("chat-expand-icon");
+    const panel = document.getElementById("chat-panel");
+    const btn   = document.getElementById("chat-expand-btn");
+    const icon  = document.getElementById("chat-expand-icon");
     if (!panel || !btn || !icon) return;
 
     isExpanded = !isExpanded;
@@ -494,6 +482,10 @@
     icon.innerHTML = isExpanded ? ICON_COLLAPSE : ICON_EXPAND;
     scrollToBottom();
   }
+
+  // ─────────────────────────────────────────
+  // Wire events
+  // ─────────────────────────────────────────
 
   function wireEvents({ launcher }) {
     launcher.addEventListener("click", () => {
@@ -517,6 +509,11 @@
         clearConversation();
       }
     });
+
+    // Escape closes the panel
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && isOpen) closeWidget();
+    });
   }
 
   // ─────────────────────────────────────────
@@ -524,7 +521,7 @@
   // ─────────────────────────────────────────
 
   document.addEventListener("DOMContentLoaded", () => {
-    const { launcher, panel } = buildWidget();
+    const { launcher } = buildWidget();
     renderInputArea();
     wireEvents({ launcher });
 
